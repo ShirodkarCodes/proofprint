@@ -96,11 +96,10 @@ def describe(dist: int) -> tuple[str, str]:
 
 
 def find_match(candidate: str | None, records: list[dict]) -> dict | None:
-    """Best perceptual match for ``candidate`` among ledger records.
-
-    Records carry ``dhash`` from the moment they were sealed. Older records
-    written before perceptual hashing existed simply have none and are skipped,
-    so this degrades quietly rather than erroring on historical data.
+    """Best perceptual match for ``candidate`` among ledger records, above the
+    SIMILAR threshold. Records carry ``dhash`` from the moment they were
+    sealed; older records written before perceptual hashing existed simply
+    have none and are skipped, so this degrades quietly on historical data.
     """
     if not candidate:
         return None
@@ -126,3 +125,20 @@ def find_match(candidate: str | None, records: list[dict]) -> dict | None:
         "confidence": confidence,
         "explanation": explanation,
     }
+
+
+def nearest(candidate: str | None, records: list[dict]) -> int | None:
+    """Smallest Hamming distance to any hashed record, with no threshold cutoff.
+
+    Used only to report "we checked, closest was N/64 bits" when nothing
+    passed the SIMILAR threshold — so a miss is visibly a miss, not silence
+    indistinguishable from never having run the comparison at all.
+    """
+    if not candidate:
+        return None
+    best: int | None = None
+    for record in records:
+        dist = distance(candidate, record.get("dhash"))
+        if dist is not None and (best is None or dist < best):
+            best = dist
+    return best

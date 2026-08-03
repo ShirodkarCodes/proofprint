@@ -342,11 +342,20 @@ def _verify_bytes(data: bytes, filename: str) -> dict[str, Any]:
         result["forensics"] = None
 
     # --- Perceptual match: recognise the image even if the bytes changed ---
+    # dHash tracks brightness gradients on a coarse 8x8 grid, which survives
+    # re-compression, resizing and quality changes — but not a crop (it changes
+    # what falls in each grid cell) or a large opaque overlay (it changes the
+    # gradients directly). Those are outside a fingerprint hash's design
+    # envelope; catching them would need feature matching, not this. The
+    # nearest distance is recorded either way so a miss is visibly a miss
+    # rather than indistinguishable from the check never having run.
+    result["nearest_distance"] = None
     try:
         from . import perceptual
 
         result["dhash"] = perceptual.dhash(scratch)
-        match = perceptual.find_match(result["dhash"], storage.list_ledger(limit=500))
+        ledger_records = storage.list_ledger(limit=500)
+        match = perceptual.find_match(result["dhash"], ledger_records)
         if match:
             result["lookalike"] = {
                 "confidence": match["confidence"],
@@ -359,6 +368,8 @@ def _verify_bytes(data: bytes, filename: str) -> dict[str, Any]:
                 "provider": match["record"].get("provider"),
                 "model": match["record"].get("model"),
             }
+        else:
+            result["nearest_distance"] = perceptual.nearest(result["dhash"], ledger_records)
     except Exception:
         log.warning("perceptual match failed", exc_info=True)
 
@@ -399,6 +410,24 @@ def _verify_bytes(data: bytes, filename: str) -> dict[str, Any]:
                 "A perceptual match is a strong lead, not cryptographic proof."
             )
             return result
+
+        from . import perceptual
+
+        if result["nearest_distance"] is None:
+            add_check(
+                "Perceptual match against the B2 archive",
+                None,
+                "No sealed assets with a recorded fingerprint to compare against yet.",
+            )
+        else:
+            add_check(
+                "Perceptual match against the B2 archive",
+                False,
+                f"No match. Nearest sealed asset differs in {result['nearest_distance']}/64 bits "
+                f"— beyond the {perceptual.SIMILAR}-bit threshold for a crop or heavy edit. "
+                "A hash like this catches re-compression and resizing; a crop or a large "
+                "overlay changes too much of the image to fingerprint-match.",
+            )
         if result["c2pa"]:
             result["verdict"] = "EXTERNAL_PROVENANCE"
             result["headline"] = "Provenance from another issuer"
