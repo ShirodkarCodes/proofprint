@@ -425,11 +425,12 @@ def mint(
 
     storage.write_ledger(record)
 
-    # Best-effort scratch cleanup; the durable copies are already in B2.
-    for path in (raw_path, sealed_path):
-        try:
-            path.unlink(missing_ok=True)
-        except Exception:
-            pass
+    # Drop the whole per-mint working directory, not just the two files we
+    # named: the provider's original download and the PNG normalisation step
+    # both leave artefacts behind, and a long-running container accumulates
+    # them. The durable copies are already in B2.
+    import shutil
+
+    shutil.rmtree(work, ignore_errors=True)
 
     return record

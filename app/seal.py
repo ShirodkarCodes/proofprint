@@ -272,7 +272,36 @@ def _manifest_summary(manifest: Manifest) -> dict[str, Any]:
 
 
 def verify_bytes(data: bytes, filename: str) -> dict[str, Any]:
-    """Run the full three-layer check over an uploaded file."""
+    """Run the full check over an uploaded file, leaving nothing on disk."""
+    try:
+        return _verify_bytes(data, filename)
+    finally:
+        _sweep_scratch()
+
+
+def _sweep_scratch() -> None:
+    """Delete verify scratch files.
+
+    Every verification writes the upload to disk so the Genblaze handlers and
+    the C2PA reader — both of which take paths, not buffers — can read it. Left
+    alone these accumulate: 14 verifications had already left 13 MB behind,
+    which on a small container is a slow march toward a full disk.
+    """
+    import time as _time
+
+    work = storage.settings.work_dir / "verify"
+    if not work.is_dir():
+        return
+    cutoff = _time.time() - 60  # keep anything a concurrent request may still hold
+    for path in work.iterdir():
+        try:
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            pass
+
+
+def _verify_bytes(data: bytes, filename: str) -> dict[str, Any]:
     work = storage.settings.work_dir / "verify"
     work.mkdir(parents=True, exist_ok=True)
 
@@ -476,6 +505,10 @@ def verify_bytes(data: bytes, filename: str) -> dict[str, Any]:
             "This file is byte-identical to the asset ProofPrint sealed, and its "
             "provenance record is intact."
         )
+        # An exact match makes the perceptual hit redundant — it is the same
+        # asset — and showing a "looks like" panel next to a byte-exact verdict
+        # reads as a weaker second opinion rather than extra information.
+        result["lookalike"] = None
         return result
 
     # Manifest is valid, but these exact bytes are not the ones we sealed.
