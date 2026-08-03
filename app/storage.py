@@ -158,8 +158,24 @@ def put_bytes(
     )
 
 
-def get_bytes(key: str) -> bytes:
-    return backend().get(key)
+def get_bytes(key: str, *, attempts: int = 3) -> bytes:
+    """Fetch an object, retrying the mid-stream resets B2 occasionally serves.
+
+    A dropped response body surfaces as StorageError only after the request
+    succeeded, so it is not covered by botocore's own retry policy.
+    """
+    import time as _time
+
+    last: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return backend().get(key)
+        except Exception as exc:
+            last = exc
+            if attempt < attempts - 1:
+                _time.sleep(0.4 * (2**attempt))
+                log.warning("retrying get for %s after %s", key, type(exc).__name__)
+    raise last  # type: ignore[misc]
 
 
 def exists(key: str) -> bool:
@@ -207,11 +223,42 @@ def write_ledger(record: dict[str, Any]) -> str:
         },
         immutable=True,
     )
+    invalidate_ledger_cache()
     return key
 
 
+# A single verification can consult the ledger three times (exact-hash lookup,
+# run lookup, perceptual sweep) and each record is its own B2 object, so an
+# uncached scan issues O(records) GETs per request and degrades as the archive
+# grows. Ledger objects are immutable and only ever appended, so a short TTL is
+# safe: the worst case is a newly minted asset staying invisible for a few
+# seconds, and write_ledger drops the cache anyway.
+_LEDGER_TTL_SEC = 20.0
+_ledger_cache: tuple[float, list[dict[str, Any]]] | None = None
+
+
+def invalidate_ledger_cache() -> None:
+    global _ledger_cache
+    _ledger_cache = None
+
+
 def list_ledger(limit: int = 200) -> list[dict[str, Any]]:
-    """Newest-first scan of the ledger prefix."""
+    """Newest-first scan of the ledger prefix, cached briefly."""
+    global _ledger_cache
+
+    import time as _time
+
+    if _ledger_cache is not None:
+        cached_at, records = _ledger_cache
+        if _time.monotonic() - cached_at < _LEDGER_TTL_SEC:
+            return records[:limit]
+
+    records = _read_ledger()
+    _ledger_cache = (_time.monotonic(), records)
+    return records[:limit]
+
+
+def _read_ledger() -> list[dict[str, Any]]:
     prefix = f"{settings.b2_prefix}/ledger/"
     keys: list[str] = []
     token: str | None = None
@@ -225,13 +272,28 @@ def list_ledger(limit: int = 200) -> list[dict[str, Any]]:
             break
 
     keys.sort(reverse=True)  # timestamp-prefixed keys sort chronologically
-    records: list[dict[str, Any]] = []
-    for key in keys[:limit]:
+    if not keys:
+        return []
+
+    # Each ledger entry is its own object, so a serial scan pays one full B2
+    # round trip per record — measured at ~5s each, which made even a handful of
+    # records take half a minute. The fetches are independent, so issue them
+    # together and keep the wall clock at roughly one round trip.
+    from concurrent.futures import ThreadPoolExecutor
+
+    def fetch(key: str) -> dict[str, Any] | None:
         try:
-            records.append(json.loads(get_bytes(key)))
+            return json.loads(get_bytes(key))
         except Exception:
             log.warning("skipping unreadable ledger object %s", key, exc_info=True)
-    return records
+            return None
+
+    # Stay under botocore's default connection pool of 10, or the extra workers
+    # just queue on the pool and can trip connection resets.
+    with ThreadPoolExecutor(max_workers=min(8, len(keys))) as pool:
+        fetched = list(pool.map(fetch, keys))
+
+    return [record for record in fetched if record is not None]
 
 
 def find_by_sha(sha256: str) -> dict[str, Any] | None:

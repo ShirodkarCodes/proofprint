@@ -37,6 +37,28 @@ class MintRequest(BaseModel):
     provider: str | None = None
 
 
+@app.on_event("startup")
+def warm_caches() -> None:
+    """Settle Object Lock and prime the ledger off the request path.
+
+    The first ledger read fans out a GET per record and can take a long time on
+    a cold or lossy link. Doing it in a background thread at boot means the
+    first person to open the app gets the cached copy instead of wearing it.
+    """
+    import threading
+
+    def warm() -> None:
+        try:
+            storage.probe_object_lock()
+            records = storage.list_ledger(limit=500)
+            log.info("ledger cache warmed: %d records", len(records))
+        except Exception:
+            log.warning("cache warm failed; will populate on first request", exc_info=True)
+
+    if settings.b2_configured:
+        threading.Thread(target=warm, daemon=True, name="proofprint-warm").start()
+
+
 # --- pages ----------------------------------------------------------------
 
 

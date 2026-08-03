@@ -294,6 +294,7 @@ def verify_bytes(data: bytes, filename: str) -> dict[str, Any]:
         "ledger": None,
         "c2pa": None,
         "forensics": None,
+        "lookalike": None,
     }
 
     def add_check(name: str, passed: bool | None, detail: str) -> None:
@@ -310,6 +311,27 @@ def verify_bytes(data: bytes, filename: str) -> dict[str, Any]:
     except Exception:
         log.warning("forensics pass failed", exc_info=True)
         result["forensics"] = None
+
+    # --- Perceptual match: recognise the image even if the bytes changed ---
+    try:
+        from . import perceptual
+
+        result["dhash"] = perceptual.dhash(scratch)
+        match = perceptual.find_match(result["dhash"], storage.list_ledger(limit=500))
+        if match:
+            result["lookalike"] = {
+                "confidence": match["confidence"],
+                "distance": match["distance"],
+                "explanation": match["explanation"],
+                "sha256": match["record"].get("sha256"),
+                "run_id": match["record"].get("run_id"),
+                "brief": match["record"].get("brief"),
+                "created_at": match["record"].get("created_at"),
+                "provider": match["record"].get("provider"),
+                "model": match["record"].get("model"),
+            }
+    except Exception:
+        log.warning("perceptual match failed", exc_info=True)
 
     # --- Layer 0: C2PA Content Credentials from any issuer ----------------
     # Runs first and independently of ProofPrint's own manifest, so a file that
@@ -330,7 +352,24 @@ def verify_bytes(data: bytes, filename: str) -> dict[str, Any]:
         add_check("C2PA Content Credentials", None, "No Content Credentials in this file.")
 
     def unsigned_outcome() -> dict[str, Any]:
-        """No ProofPrint manifest — but C2PA may still establish provenance."""
+        """No ProofPrint manifest — but other signals may still identify it."""
+        if result["lookalike"]:
+            look = result["lookalike"]
+            add_check(
+                "Perceptual match against the B2 archive",
+                None,
+                f"{look['confidence']} match to a sealed asset "
+                f"({look['distance']}/64 bits differ). {look['explanation']}",
+            )
+            result["verdict"] = "STRIPPED_COPY"
+            result["headline"] = "Looks like a sealed asset, stripped of its proof"
+            result["detail"] = (
+                "No manifest survives in this file, but it is perceptually a match for "
+                f"an asset ProofPrint sealed on {str(look['created_at'])[:19]}. That is "
+                "what a screenshot, a re-export or a messaging app does to provenance. "
+                "A perceptual match is a strong lead, not cryptographic proof."
+            )
+            return result
         if result["c2pa"]:
             result["verdict"] = "EXTERNAL_PROVENANCE"
             result["headline"] = "Provenance from another issuer"

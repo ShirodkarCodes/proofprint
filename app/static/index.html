@@ -323,6 +323,36 @@
             </template>
           </div>
 
+          <!-- perceptual match against the sealed archive -->
+          <template x-if="verdict.lookalike">
+            <div class="mt-5 pt-4 border-t border-slate-800/80">
+              <div class="flex items-center gap-2 mb-2.5">
+                <span class="text-orange-400 text-xs font-medium uppercase tracking-wider">
+                  Perceptual match</span>
+                <span class="text-[10px] px-1.5 py-0.5 rounded bg-orange-500/15 text-orange-300"
+                      x-text="verdict.lookalike.confidence"></span>
+                <span class="text-[10px] text-slate-600 mono"
+                      x-text="verdict.lookalike.distance + '/64 bits differ'"></span>
+              </div>
+              <div class="flex gap-3 items-start">
+                <img :src="'/api/asset/'+verdict.lookalike.sha256"
+                     class="w-16 h-16 rounded object-cover bg-black shrink-0" alt="">
+                <div class="text-xs min-w-0">
+                  <div class="text-slate-300" x-text="verdict.lookalike.brief"></div>
+                  <div class="mono text-slate-500 mt-1"
+                       x-text="verdict.lookalike.provider + ' · ' + verdict.lookalike.model"></div>
+                  <div class="text-slate-500 mt-0.5"
+                       x-text="'sealed ' + new Date(verdict.lookalike.created_at).toLocaleString()"></div>
+                  <button @click="openCert(verdict.lookalike.sha256)"
+                          class="text-orange-400 hover:text-orange-300 mt-1.5">
+                    open the original's certificate →</button>
+                </div>
+              </div>
+              <p class="text-[11px] text-slate-500 mt-2.5 leading-relaxed"
+                 x-text="verdict.lookalike.explanation"></p>
+            </div>
+          </template>
+
           <!-- C2PA Content Credentials from any issuer -->
           <template x-if="verdict.c2pa">
             <div class="mt-5 pt-4 border-t border-slate-800/80">
@@ -597,7 +627,7 @@ function proofprint() {
   return {
     tab:'studio', health:null, brief:'', expand:true, parent:null,
     minting:false, stage:'', progress:0, result:null, error:'', providerId:null,
-    drag:false, verifying:false, verdict:null, showForensics:false,
+    drag:false, verifying:false, verdict:null, showForensics:true,
     ledger:null, cert:null, lineage:null, copied:false,
 
     async boot() {
@@ -655,7 +685,7 @@ function proofprint() {
 
     async handleFile(file) {
       if (!file) return;
-      this.verifying = true; this.verdict = null; this.showForensics = false;
+      this.verifying = true; this.verdict = null; this.showForensics = true;
       try {
         const fd = new FormData(); fd.append('file', file);
         const res = await fetch('/api/verify', {method:'POST', body:fd});
@@ -677,7 +707,8 @@ function proofprint() {
         TAMPERED:           {icon:'✕', bg:'bg-rose-500/15 text-rose-400',     text:'text-rose-400'},
         UNSIGNED:           {icon:'?', bg:'bg-slate-700/40 text-slate-400',   text:'text-slate-300'},
         UNKNOWN_ORIGIN:     {icon:'?', bg:'bg-sky-500/15 text-sky-400',       text:'text-sky-400'},
-        EXTERNAL_PROVENANCE:{icon:'⌘', bg:'bg-violet-500/15 text-violet-400', text:'text-violet-400'}
+        EXTERNAL_PROVENANCE:{icon:'⌘', bg:'bg-violet-500/15 text-violet-400', text:'text-violet-400'},
+        STRIPPED_COPY:      {icon:'◑', bg:'bg-orange-500/15 text-orange-400', text:'text-orange-400'}
       }[v] || {icon:'?', bg:'bg-slate-700/40 text-slate-400', text:'text-slate-300'};
     },
 

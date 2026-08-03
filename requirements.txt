@@ -12,3 +12,4 @@ defusedxml==0.7.1
 fastapi==0.128.4
 uvicorn[standard]==0.42.0
 python-multipart==0.0.20
+pillow-heif==1.5.0

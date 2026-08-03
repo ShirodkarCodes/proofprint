@@ -114,6 +114,15 @@ def inspect(path: Path) -> dict[str, Any]:
         report["notes"].append("Pillow unavailable; no metadata read.")
         return report
 
+    # iPhones shoot HEIC by default, and an unregistered opener makes every
+    # photo straight off a phone look like it has no metadata at all.
+    try:
+        import pillow_heif
+
+        pillow_heif.register_heif_opener()
+    except Exception:
+        log.debug("pillow-heif unavailable; HEIC/HEIF will not be readable")
+
     try:
         with Image.open(path) as image:
             report["format"] = image.format

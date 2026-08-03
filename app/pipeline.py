@@ -27,7 +27,7 @@ from typing import Any
 
 from genblaze_core import Modality, Pipeline
 
-from . import storage
+from . import perceptual, storage
 from .config import (
     GEMINI_CHAT_MODELS,
     GEMINI_FALLBACKS,
@@ -409,6 +409,8 @@ def mint(
         "sha256": sealed_sha,
         "sealed_sha256": sealed_sha,
         "raw_sha256": asset.sha256,
+        # Survives re-encoding, so a stripped copy can still be traced back.
+        "dhash": perceptual.dhash(sealed_path),
         "canonical_hash": manifest.canonical_hash,
         "manifest_uri": manifest.manifest_uri,
         "sealed_key": key,
