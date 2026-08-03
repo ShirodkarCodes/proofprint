@@ -67,19 +67,32 @@ EXTRACT_TIMEOUT_SEC = 20
 
 
 def _extract_bounded(handler: Any, path: Path) -> Manifest:
-    from concurrent.futures import ThreadPoolExecutor
-    from concurrent.futures import TimeoutError as FuturesTimeout
+    """Extract with a deadline, on a thread that can be safely abandoned.
 
-    pool = ThreadPoolExecutor(max_workers=1)
-    future = pool.submit(handler.extract, path)
-    try:
-        return future.result(timeout=EXTRACT_TIMEOUT_SEC)
-    except FuturesTimeout as exc:
-        raise TimeoutError(f"metadata extraction exceeded {EXTRACT_TIMEOUT_SEC}s") from exc
-    finally:
-        # The stuck worker is abandoned rather than joined; shutdown(wait=False)
-        # keeps the request path free.
-        pool.shutdown(wait=False, cancel_futures=True)
+    Deliberately a raw daemon thread rather than ThreadPoolExecutor: pool
+    workers are non-daemon and ``concurrent.futures`` joins them at interpreter
+    exit, so one wedged extraction would hang shutdown and leak a thread per
+    request. A daemon thread just gets dropped.
+    """
+    import threading
+
+    box: dict[str, Any] = {}
+
+    def work() -> None:
+        try:
+            box["value"] = handler.extract(path)
+        except BaseException as exc:  # noqa: BLE001 - relayed to the caller
+            box["error"] = exc
+
+    thread = threading.Thread(target=work, daemon=True, name="proofprint-extract")
+    thread.start()
+    thread.join(timeout=EXTRACT_TIMEOUT_SEC)
+
+    if thread.is_alive():
+        raise TimeoutError(f"metadata extraction exceeded {EXTRACT_TIMEOUT_SEC}s")
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
 
 
 # Sealed stills are normalised to PNG before embedding. Two reasons:
