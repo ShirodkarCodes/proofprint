@@ -272,6 +272,21 @@
 
     <div class="mt-7 grid lg:grid-cols-2 gap-6">
       <div>
+        <div class="card rounded-xl p-3 mb-3">
+          <div class="flex gap-2">
+            <input type="url" x-model="verifyUrl" @keydown.enter="checkUrl()"
+              :disabled="verifying" placeholder="…or paste an image URL from anywhere on the web"
+              class="flex-1 bg-[#08090c] border border-slate-800 rounded-lg px-3 py-2 text-sm
+                     focus:outline-none focus:border-emerald-500/60 disabled:opacity-50">
+            <button @click="checkUrl()" :disabled="verifying || !verifyUrl.trim()"
+              class="px-4 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40
+                     text-sm transition shrink-0">Inspect</button>
+          </div>
+          <div class="text-[11px] text-slate-600 mt-2">
+            Works on any public image — a news photo, a Midjourney render, a product shot.
+          </div>
+        </div>
+
         <label
           @dragover.prevent="drag=true" @dragleave.prevent="drag=false"
           @drop.prevent="drag=false; handleFile($event.dataTransfer.files[0])"
@@ -496,6 +511,36 @@
               rounded-md px-3 py-1.5 transition">Refresh</button>
     </div>
 
+    <!-- live archive stats from B2 -->
+    <template x-if="stats">
+      <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mt-6">
+        <template x-for="c in [
+            ['Sealed assets', stats.sealed_assets, ''],
+            ['Stored in B2', fmtBytes(stats.total_bytes), stats.bucket],
+            ['Object Lock', stats.object_lock_coverage, stats.object_lock_status],
+            ['Iterations', stats.iterations, 'linked by parent_run_id'],
+            ['Near-duplicates', stats.near_duplicate_clusters + ' clusters',
+             stats.reclaimable_bytes ? fmtBytes(stats.reclaimable_bytes)+' reclaimable' : 'none found']
+          ]" :key="c[0]">
+          <div class="card rounded-xl p-3.5">
+            <div class="text-[11px] uppercase tracking-wider text-slate-500" x-text="c[0]"></div>
+            <div class="text-lg font-semibold text-white mt-1 truncate" x-text="c[1]"></div>
+            <div class="text-[10px] text-slate-600 mt-0.5 truncate" x-text="c[2]"></div>
+          </div>
+        </template>
+      </div>
+    </template>
+
+    <template x-if="stats && Object.keys(stats.by_provider||{}).length">
+      <div class="flex flex-wrap gap-2 mt-3">
+        <template x-for="[k,v] in Object.entries(stats.by_provider)" :key="k">
+          <span class="text-[11px] mono px-2 py-1 rounded border border-slate-800 text-slate-400">
+            <span x-text="k"></span> · <span class="text-slate-200" x-text="v"></span>
+          </span>
+        </template>
+      </div>
+    </template>
+
     <template x-if="ledger && !ledger.length">
       <div class="card rounded-xl mt-6 p-10 text-center text-slate-600 text-sm">
         Nothing sealed yet. Mint something in the Studio.
@@ -627,8 +672,8 @@ function proofprint() {
   return {
     tab:'studio', health:null, brief:'', expand:true, parent:null,
     minting:false, stage:'', progress:0, result:null, error:'', providerId:null,
-    drag:false, verifying:false, verdict:null, showForensics:true,
-    ledger:null, cert:null, lineage:null, copied:false,
+    drag:false, verifying:false, verdict:null, showForensics:true, verifyUrl:'',
+    ledger:null, cert:null, lineage:null, copied:false, stats:null,
 
     async boot() {
       try { this.health = await (await fetch('/api/health')).json() } catch(e){}
@@ -700,6 +745,23 @@ function proofprint() {
       } finally { this.verifying = false }
     },
 
+    async checkUrl() {
+      if (!this.verifyUrl.trim()) return;
+      this.verifying = true; this.verdict = null; this.showForensics = true;
+      try {
+        const res = await fetch('/api/verify-url', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({url: this.verifyUrl.trim()})
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Could not inspect that URL');
+        this.verdict = data;
+      } catch(e) {
+        this.verdict = {verdict:'UNSIGNED', headline:'Could not inspect', detail:e.message,
+                        filename:this.verifyUrl, checks:[], uploaded_sha256:''};
+      } finally { this.verifying = false }
+    },
+
     badge(v) {
       return {
         AUTHENTIC:          {icon:'✓', bg:'bg-emerald-500/15 text-emerald-400', text:'text-emerald-400'},
@@ -717,6 +779,14 @@ function proofprint() {
         const data = await (await fetch('/api/ledger')).json();
         this.ledger = data.records || [];
       } catch(e) { this.ledger = [] }
+      try { this.stats = await (await fetch('/api/stats')).json() } catch(e) {}
+    },
+
+    fmtBytes(n) {
+      if (!n) return '0 B';
+      const u = ['B','KB','MB','GB']; let i = 0;
+      while (n >= 1024 && i < u.length-1) { n /= 1024; i++ }
+      return n.toFixed(i ? 1 : 0) + ' ' + u[i];
     },
 
     async openCert(sha) {
