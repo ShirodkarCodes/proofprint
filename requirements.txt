@@ -1,0 +1,9 @@
+# Genblaze — pinned to exact PyPI versions.
+# NOTE: GitHub release tags (v0.5.x–v0.7.x) do NOT correspond to PyPI versions.
+# 0.4.5 is the latest umbrella release actually published to PyPI.
+genblaze[nvidia,google,parquet]==0.4.5
+
+fastapi==0.128.4
+uvicorn[standard]==0.42.0
+python-multipart==0.0.20
+jinja2==3.1.6

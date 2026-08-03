@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: proofprint
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      # --- Backblaze B2 (required) ---
+      - key: B2_BUCKET
+        sync: false
+      - key: B2_KEY_ID
+        sync: false
+      - key: B2_APP_KEY
+        sync: false
+      - key: B2_REGION
+        sync: false
+      # Object Lock retention in days for sealed assets + manifests.
+      # Set to 0 if the bucket was created without Object Lock enabled.
+      - key: B2_OBJECT_LOCK_DAYS
+        value: "1"
+      - key: B2_PREFIX
+        value: proofprint
+
+      # --- Generative providers (at least one required) ---
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+
+      - key: PROOFPRINT_TENANT
+        value: public-demo

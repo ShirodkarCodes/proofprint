@@ -1,0 +1,558 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ProofPrint — Chain of Custody for AI Media</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+<style>
+  :root { color-scheme: dark; }
+  body { background:#08090c; font-family: ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+  .mono { font-family: ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .card { background:#0e1016; border:1px solid #1e2230; }
+  .glow { box-shadow:0 0 0 1px rgba(52,211,153,.25), 0 12px 40px -12px rgba(52,211,153,.25); }
+  .hash { word-break:break-all; }
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-thumb{background:#252a38;border-radius:9px}
+  .spin { animation:spin 1s linear infinite } @keyframes spin{to{transform:rotate(360deg)}}
+  .fade { animation:fade .35s ease both } @keyframes fade{from{opacity:0;transform:translateY(6px)}}
+  [x-cloak]{display:none!important}
+</style>
+</head>
+<body class="text-slate-200 min-h-screen antialiased">
+<div x-data="proofprint()" x-init="boot()" x-cloak>
+
+  <!-- ── header ─────────────────────────────────────────────── -->
+  <header class="border-b border-slate-800/80 sticky top-0 z-30 backdrop-blur bg-[#08090c]/85">
+    <div class="max-w-6xl mx-auto px-5 h-16 flex items-center gap-4">
+      <div class="flex items-center gap-2.5 cursor-pointer" @click="tab='studio'">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" class="text-emerald-400">
+          <path d="M12 2 4 6v6c0 5 3.4 9.4 8 10 4.6-.6 8-5 8-10V6l-8-4Z" stroke="currentColor" stroke-width="1.6"/>
+          <path d="m8.6 12 2.3 2.3 4.5-4.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="font-semibold tracking-tight text-[15px]">ProofPrint</span>
+      </div>
+      <nav class="ml-4 flex gap-1 text-sm">
+        <template x-for="t in [['studio','Studio'],['verify','Verify'],['archive','Archive']]" :key="t[0]">
+          <button @click="go(t[0])"
+            class="px-3 py-1.5 rounded-md transition"
+            :class="tab===t[0] ? 'bg-slate-800 text-white' : 'text-slate-400 hover:text-slate-200'"
+            x-text="t[1]"></button>
+        </template>
+      </nav>
+      <div class="ml-auto flex items-center gap-3 text-xs">
+        <span class="hidden sm:flex items-center gap-1.5 text-slate-500">
+          <span class="w-1.5 h-1.5 rounded-full"
+                :class="health && health.status==='ok' ? 'bg-emerald-400' : 'bg-amber-400'"></span>
+          <span x-text="health ? (health.b2.bucket || 'no bucket') : '…'"></span>
+        </span>
+        <a href="/docs" target="_blank" class="text-slate-500 hover:text-slate-300">API</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- config banner -->
+  <template x-if="health && health.missing_env && health.missing_env.length">
+    <div class="bg-amber-500/10 border-b border-amber-500/25 text-amber-200 text-sm">
+      <div class="max-w-6xl mx-auto px-5 py-2.5">
+        Missing configuration: <span class="mono" x-text="health.missing_env.join(', ')"></span>
+      </div>
+    </div>
+  </template>
+
+  <main class="max-w-6xl mx-auto px-5 py-9">
+
+  <!-- ══ STUDIO ═════════════════════════════════════════════ -->
+  <section x-show="tab==='studio'" class="fade">
+    <div class="mb-8">
+      <h1 class="text-[27px] font-semibold tracking-tight text-white">
+        Generate media that can prove where it came from.
+      </h1>
+      <p class="text-slate-400 mt-2 max-w-2xl leading-relaxed">
+        Every asset is generated through a multi-provider Genblaze pipeline, sealed with a
+        SHA-256 provenance manifest <em class="text-slate-300 not-italic">embedded inside the file</em>,
+        and written to Backblaze B2 under Object Lock. The proof travels with the image.
+      </p>
+    </div>
+
+    <div class="grid lg:grid-cols-5 gap-6">
+      <!-- input -->
+      <div class="lg:col-span-2 card rounded-xl p-5">
+        <label class="text-xs uppercase tracking-wider text-slate-500 font-medium">Creative brief</label>
+        <textarea x-model="brief" rows="5" :disabled="minting"
+          class="mt-2 w-full bg-[#08090c] border border-slate-800 rounded-lg p-3 text-sm
+                 focus:outline-none focus:border-emerald-500/60 resize-none disabled:opacity-50"
+          placeholder="a lighthouse on a basalt cliff during a winter storm"></textarea>
+
+        <label class="flex items-center gap-2.5 mt-4 text-sm text-slate-400 cursor-pointer">
+          <input type="checkbox" x-model="expand" :disabled="minting"
+                 class="accent-emerald-500 w-4 h-4">
+          Expand brief with Gemini before generating
+        </label>
+
+        <template x-if="parent">
+          <div class="mt-4 text-xs bg-sky-500/10 border border-sky-500/25 rounded-lg p-3">
+            <div class="text-sky-300 font-medium">Iterating on an existing run</div>
+            <div class="mono text-slate-400 mt-1 hash" x-text="parent"></div>
+            <button @click="parent=null" class="text-sky-400 hover:text-sky-300 mt-1.5">clear</button>
+          </div>
+        </template>
+
+        <button @click="mint()" :disabled="minting || !brief.trim()"
+          class="mt-5 w-full bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40
+                 disabled:cursor-not-allowed text-slate-950 font-semibold rounded-lg py-2.5
+                 text-sm transition flex items-center justify-center gap-2">
+          <svg x-show="minting" class="spin" width="15" height="15" viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="3" opacity=".25"/>
+            <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+          </svg>
+          <span x-text="minting ? 'Generating & sealing…' : 'Generate & Seal'"></span>
+        </button>
+
+        <template x-if="minting">
+          <div class="mt-4 space-y-1.5 text-xs text-slate-500">
+            <div x-text="stage"></div>
+            <div class="h-1 bg-slate-800 rounded overflow-hidden">
+              <div class="h-full bg-emerald-500/70 transition-all duration-700"
+                   :style="`width:${progress}%`"></div>
+            </div>
+          </div>
+        </template>
+
+        <template x-if="error">
+          <div class="mt-4 text-xs bg-rose-500/10 border border-rose-500/25 text-rose-300 rounded-lg p-3">
+            <span x-text="error"></span>
+          </div>
+        </template>
+
+        <!-- provider chain -->
+        <template x-if="health">
+          <div class="mt-6 pt-5 border-t border-slate-800/80 text-xs space-y-2.5">
+            <div class="text-slate-500 uppercase tracking-wider font-medium">Active pipeline</div>
+            <template x-if="health.providers.google.enabled">
+              <div class="flex gap-2.5"><span class="text-slate-600">1</span>
+                <div><span class="text-slate-300">Prompt expansion</span>
+                  <div class="mono text-slate-500" x-text="'google · '+health.providers.google.chat"></div></div></div>
+            </template>
+            <template x-if="health.providers.nvidia_nim.enabled">
+              <div class="flex gap-2.5"><span class="text-slate-600">2</span>
+                <div><span class="text-slate-300">Image generation</span>
+                  <div class="mono text-slate-500" x-text="'nvidia nim · '+health.providers.nvidia_nim.primary"></div>
+                  <div class="mono text-slate-600" x-text="'↳ fallback: '+health.providers.nvidia_nim.fallbacks.join(' → ')"></div></div></div>
+            </template>
+            <div class="flex gap-2.5"><span class="text-slate-600">3</span>
+              <div><span class="text-slate-300">Seal & store</span>
+                <div class="mono text-slate-500"
+                     x-text="'b2://'+(health.b2.bucket||'?')+' · '+health.b2.object_lock"></div></div></div>
+          </div>
+        </template>
+      </div>
+
+      <!-- result -->
+      <div class="lg:col-span-3">
+        <template x-if="!result && !minting">
+          <div class="card rounded-xl h-full min-h-[380px] flex items-center justify-center text-center p-8">
+            <div class="text-slate-600 text-sm max-w-xs leading-relaxed">
+              Your sealed asset and its certificate will appear here.
+            </div>
+          </div>
+        </template>
+
+        <template x-if="result">
+          <div class="card rounded-xl overflow-hidden fade">
+            <img :src="'/api/asset/'+result.sha256" class="w-full bg-black object-contain max-h-[420px]" alt="sealed asset">
+            <div class="p-5 space-y-4">
+              <div class="flex items-start gap-3">
+                <div class="flex-1 min-w-0">
+                  <div class="text-emerald-400 text-xs font-semibold tracking-wide uppercase">Sealed & stored</div>
+                  <div class="text-sm text-slate-300 mt-1" x-text="result.prompt"></div>
+                </div>
+                <button @click="openCert(result.sha256)"
+                  class="shrink-0 text-xs border border-slate-700 hover:border-emerald-500/60
+                         hover:text-emerald-300 rounded-md px-3 py-1.5 transition">Certificate</button>
+              </div>
+
+              <div class="grid sm:grid-cols-2 gap-x-5 gap-y-3 text-xs">
+                <div><div class="text-slate-500">Provider · model</div>
+                  <div class="mono text-slate-300 mt-0.5" x-text="result.provider+' · '+result.model"></div></div>
+                <div><div class="text-slate-500">Object Lock</div>
+                  <div class="mono text-slate-300 mt-0.5"
+                       x-text="result.object_lock_days ? 'GOVERNANCE · '+result.object_lock_days+'d' : 'disabled'"></div></div>
+                <div class="sm:col-span-2"><div class="text-slate-500">Sealed SHA-256</div>
+                  <div class="mono text-emerald-300/90 mt-0.5 hash" x-text="result.sha256"></div></div>
+                <div class="sm:col-span-2"><div class="text-slate-500">Manifest canonical hash</div>
+                  <div class="mono text-slate-400 mt-0.5 hash" x-text="result.canonical_hash"></div></div>
+                <div class="sm:col-span-2"><div class="text-slate-500">B2 key</div>
+                  <div class="mono text-slate-400 mt-0.5 hash" x-text="result.sealed_key"></div></div>
+              </div>
+
+              <!-- attempts -->
+              <template x-if="result.attempts && result.attempts.length">
+                <div class="pt-3 border-t border-slate-800/80">
+                  <div class="text-slate-500 text-xs mb-2">Provider attempts</div>
+                  <template x-for="a in result.attempts" :key="a.provider">
+                    <div class="flex items-center gap-2 text-xs mono py-0.5">
+                      <span :class="a.status==='ok'?'text-emerald-400':'text-rose-400'"
+                            x-text="a.status==='ok'?'✓':'✕'"></span>
+                      <span class="text-slate-400" x-text="a.provider"></span>
+                      <span class="text-slate-600" x-text="a.ms+'ms'"></span>
+                      <span class="text-rose-400/70 truncate" x-text="a.error||''"></span>
+                    </div>
+                  </template>
+                </div>
+              </template>
+
+              <div class="flex gap-2 pt-1">
+                <a :href="'/api/asset/'+result.sha256" download
+                   class="flex-1 text-center text-xs border border-slate-700 hover:border-slate-500
+                          rounded-md py-2 transition">Download sealed file</a>
+                <button @click="parent=result.run_id; brief=result.brief; tab='studio'; scrollTop()"
+                   class="flex-1 text-xs border border-slate-700 hover:border-sky-500/60
+                          hover:text-sky-300 rounded-md py-2 transition">Iterate on this</button>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ VERIFY ═════════════════════════════════════════════ -->
+  <section x-show="tab==='verify'" class="fade">
+    <h1 class="text-[27px] font-semibold tracking-tight text-white">Verify a file</h1>
+    <p class="text-slate-400 mt-2 max-w-2xl leading-relaxed">
+      Drop any image. ProofPrint extracts the embedded manifest, recomputes its canonical
+      hash, and re-hashes the bytes against the immutable record in Backblaze B2.
+      Change a single pixel and the check fails.
+    </p>
+
+    <div class="mt-7 grid lg:grid-cols-2 gap-6">
+      <div>
+        <label
+          @dragover.prevent="drag=true" @dragleave.prevent="drag=false"
+          @drop.prevent="drag=false; handleFile($event.dataTransfer.files[0])"
+          class="card rounded-xl border-dashed h-64 flex flex-col items-center justify-center
+                 cursor-pointer transition text-center px-6"
+          :class="drag ? 'border-emerald-500 bg-emerald-500/5' : 'hover:border-slate-600'">
+          <input type="file" class="hidden" accept="image/*,video/mp4"
+                 @change="handleFile($event.target.files[0])">
+          <svg width="30" height="30" viewBox="0 0 24 24" fill="none" class="text-slate-600 mb-3">
+            <path d="M12 16V4m0 0L8 8m4-4 4 4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"
+                  stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <div class="text-sm text-slate-300">Drop a file or click to browse</div>
+          <div class="text-xs text-slate-600 mt-1">PNG, JPEG, WebP, MP4 · up to 64 MB</div>
+        </label>
+
+        <template x-if="verifying">
+          <div class="mt-4 text-sm text-slate-500 flex items-center gap-2">
+            <svg class="spin" width="14" height="14" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="3" opacity=".25"/>
+              <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+            </svg>
+            Extracting manifest and cross-checking B2…
+          </div>
+        </template>
+      </div>
+
+      <template x-if="verdict">
+        <div class="card rounded-xl p-5 fade" :class="verdict.verdict==='AUTHENTIC' ? 'glow' : ''">
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-full flex items-center justify-center text-lg shrink-0"
+                 :class="badge(verdict.verdict).bg" x-text="badge(verdict.verdict).icon"></div>
+            <div class="min-w-0">
+              <div class="font-semibold" :class="badge(verdict.verdict).text" x-text="verdict.headline"></div>
+              <div class="text-xs text-slate-500 mono" x-text="verdict.filename"></div>
+            </div>
+          </div>
+          <p class="text-sm text-slate-400 mt-3 leading-relaxed" x-text="verdict.detail"></p>
+
+          <div class="mt-5 space-y-2.5">
+            <template x-for="c in verdict.checks" :key="c.name">
+              <div class="flex gap-2.5 text-xs">
+                <span class="shrink-0 mt-0.5"
+                      :class="c.passed===true?'text-emerald-400':c.passed===false?'text-rose-400':'text-slate-600'"
+                      x-text="c.passed===true?'✓':c.passed===false?'✕':'—'"></span>
+                <div><div class="text-slate-300" x-text="c.name"></div>
+                  <div class="text-slate-500 mt-0.5" x-text="c.detail"></div></div>
+              </div>
+            </template>
+          </div>
+
+          <template x-if="verdict.manifest">
+            <div class="mt-5 pt-4 border-t border-slate-800/80 text-xs space-y-2.5">
+              <div class="text-slate-500 uppercase tracking-wider font-medium">Recovered provenance</div>
+              <template x-for="s in verdict.manifest.steps" :key="s.index">
+                <div>
+                  <div class="mono text-slate-300" x-text="(s.provider||'?')+' · '+(s.model||'?')"></div>
+                  <div class="text-slate-500 mt-0.5" x-text="s.prompt"></div>
+                </div>
+              </template>
+              <div><span class="text-slate-500">run</span>
+                <span class="mono text-slate-400 ml-1 hash" x-text="verdict.manifest.run_id"></span></div>
+              <div><span class="text-slate-500">canonical hash</span>
+                <span class="mono text-slate-400 ml-1 hash" x-text="verdict.manifest.canonical_hash"></span></div>
+              <template x-if="verdict.manifest.parent_run_id">
+                <div><span class="text-slate-500">derived from</span>
+                  <span class="mono text-sky-400 ml-1 hash" x-text="verdict.manifest.parent_run_id"></span></div>
+              </template>
+            </div>
+          </template>
+
+          <div class="mt-4 text-xs">
+            <span class="text-slate-500">uploaded sha256</span>
+            <div class="mono text-slate-400 mt-0.5 hash" x-text="verdict.uploaded_sha256"></div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </section>
+
+  <!-- ══ ARCHIVE ════════════════════════════════════════════ -->
+  <section x-show="tab==='archive'" class="fade">
+    <div class="flex items-end justify-between">
+      <div>
+        <h1 class="text-[27px] font-semibold tracking-tight text-white">Archive</h1>
+        <p class="text-slate-400 mt-2">Every sealed asset, read straight from the B2 ledger.</p>
+      </div>
+      <button @click="loadLedger()" class="text-xs border border-slate-700 hover:border-slate-500
+              rounded-md px-3 py-1.5 transition">Refresh</button>
+    </div>
+
+    <template x-if="ledger && !ledger.length">
+      <div class="card rounded-xl mt-6 p-10 text-center text-slate-600 text-sm">
+        Nothing sealed yet. Mint something in the Studio.
+      </div>
+    </template>
+
+    <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4 mt-6">
+      <template x-for="r in (ledger||[])" :key="r.sha256">
+        <div class="card rounded-xl overflow-hidden group cursor-pointer hover:border-slate-600 transition"
+             @click="openCert(r.sha256)">
+          <img :src="'/api/asset/'+r.sha256" loading="lazy"
+               class="w-full h-40 object-cover bg-black" alt="">
+          <div class="p-3.5">
+            <div class="text-xs text-slate-300 line-clamp-2 leading-relaxed" x-text="r.brief"></div>
+            <div class="flex items-center gap-2 mt-2.5 text-[11px]">
+              <span class="mono text-emerald-400/80" x-text="r.sha256.slice(0,12)"></span>
+              <template x-if="r.parent_run_id">
+                <span class="text-sky-400">↳ iteration</span>
+              </template>
+              <span class="ml-auto text-slate-600 mono" x-text="r.provider"></span>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </section>
+
+  </main>
+
+  <!-- ══ CERTIFICATE MODAL ══════════════════════════════════ -->
+  <div x-show="cert" @click.self="closeCert()"
+       class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 overflow-y-auto p-4 sm:p-8">
+    <div class="max-w-3xl mx-auto card rounded-xl overflow-hidden fade" x-show="cert">
+      <template x-if="cert">
+        <div>
+          <div class="flex items-center gap-3 px-6 py-4 border-b border-slate-800 bg-emerald-500/5">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" class="text-emerald-400">
+              <path d="M12 2 4 6v6c0 5 3.4 9.4 8 10 4.6-.6 8-5 8-10V6l-8-4Z" stroke="currentColor" stroke-width="1.6"/>
+              <path d="m8.6 12 2.3 2.3 4.5-4.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <div>
+              <div class="font-semibold text-white text-sm">Certificate of Provenance</div>
+              <div class="text-xs text-slate-500">Machine-readable marking · EU AI Act Art. 50</div>
+            </div>
+            <button @click="closeCert()" class="ml-auto text-slate-500 hover:text-slate-300 text-xl leading-none">×</button>
+          </div>
+
+          <img :src="'/api/asset/'+cert.sha256" class="w-full bg-black object-contain max-h-[340px]" alt="">
+
+          <div class="p-6 space-y-5 text-sm">
+            <div>
+              <div class="text-xs uppercase tracking-wider text-slate-500 font-medium">Human brief</div>
+              <div class="text-slate-300 mt-1" x-text="cert.brief"></div>
+            </div>
+            <div>
+              <div class="text-xs uppercase tracking-wider text-slate-500 font-medium">Prompt sent to model</div>
+              <div class="text-slate-400 mt-1 leading-relaxed" x-text="cert.prompt"></div>
+            </div>
+
+            <div class="grid sm:grid-cols-2 gap-x-6 gap-y-4 text-xs">
+              <div><div class="text-slate-500">Generated by</div>
+                <div class="mono text-slate-300 mt-0.5" x-text="cert.provider+' · '+cert.model"></div></div>
+              <div><div class="text-slate-500">Sealed at</div>
+                <div class="mono text-slate-300 mt-0.5" x-text="new Date(cert.created_at).toLocaleString()"></div></div>
+              <div><div class="text-slate-500">Fallback chain</div>
+                <div class="mono text-slate-400 mt-0.5" x-text="(cert.fallback_chain||[]).join(' → ')||'—'"></div></div>
+              <div><div class="text-slate-500">Dimensions</div>
+                <div class="mono text-slate-400 mt-0.5"
+                     x-text="cert.width&&cert.height ? cert.width+'×'+cert.height : '—'"></div></div>
+              <div class="sm:col-span-2"><div class="text-slate-500">Sealed SHA-256</div>
+                <div class="mono text-emerald-300/90 mt-0.5 hash" x-text="cert.sha256"></div></div>
+              <div class="sm:col-span-2"><div class="text-slate-500">Manifest canonical hash</div>
+                <div class="mono text-slate-400 mt-0.5 hash" x-text="cert.canonical_hash"></div></div>
+              <div class="sm:col-span-2"><div class="text-slate-500">Backblaze B2 object</div>
+                <div class="mono text-slate-400 mt-0.5 hash" x-text="cert.sealed_key"></div></div>
+              <div class="sm:col-span-2"><div class="text-slate-500">Run ID</div>
+                <div class="mono text-slate-400 mt-0.5 hash" x-text="cert.run_id"></div></div>
+            </div>
+
+            <!-- lineage -->
+            <template x-if="lineage && (lineage.ancestors.length>1 || lineage.children.length)">
+              <div class="pt-4 border-t border-slate-800">
+                <div class="text-xs uppercase tracking-wider text-slate-500 font-medium mb-3">Lineage</div>
+                <div class="space-y-1.5">
+                  <template x-for="(a,i) in lineage.ancestors" :key="a.run_id">
+                    <div class="flex items-center gap-2.5 text-xs">
+                      <span class="text-slate-600 mono" x-text="'v'+(i+1)"></span>
+                      <img :src="'/api/asset/'+a.sha256" class="w-9 h-9 rounded object-cover bg-black" alt="">
+                      <span class="truncate text-slate-400 flex-1" x-text="a.brief"></span>
+                      <span class="mono shrink-0"
+                            :class="a.run_id===cert.run_id?'text-emerald-400':'text-slate-600'"
+                            x-text="a.run_id===cert.run_id?'current':''"></span>
+                      <button @click.stop="openCert(a.sha256)"
+                              class="text-slate-600 hover:text-slate-300 shrink-0">open</button>
+                    </div>
+                  </template>
+                  <template x-for="c in lineage.children" :key="c.run_id">
+                    <div class="flex items-center gap-2.5 text-xs pl-5">
+                      <span class="text-sky-500">↳</span>
+                      <img :src="'/api/asset/'+c.sha256" class="w-9 h-9 rounded object-cover bg-black" alt="">
+                      <span class="truncate text-slate-400 flex-1" x-text="c.brief"></span>
+                      <button @click.stop="openCert(c.sha256)"
+                              class="text-slate-600 hover:text-slate-300 shrink-0">open</button>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </template>
+
+            <div class="pt-4 border-t border-slate-800 flex gap-2">
+              <a :href="'/api/asset/'+cert.sha256" download
+                 class="flex-1 text-center text-xs border border-slate-700 hover:border-slate-500
+                        rounded-md py-2 transition">Download sealed file</a>
+              <button @click="copyLink()"
+                 class="flex-1 text-xs border border-slate-700 hover:border-emerald-500/60
+                        hover:text-emerald-300 rounded-md py-2 transition"
+                 x-text="copied ? 'Link copied' : 'Copy certificate link'"></button>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+</div>
+
+<script>
+function proofprint() {
+  return {
+    tab:'studio', health:null, brief:'', expand:true, parent:null,
+    minting:false, stage:'', progress:0, result:null, error:'',
+    drag:false, verifying:false, verdict:null,
+    ledger:null, cert:null, lineage:null, copied:false,
+
+    async boot() {
+      try { this.health = await (await fetch('/api/health')).json() } catch(e){}
+      const path = location.pathname;
+      if (path.startsWith('/c/')) { this.openCert(path.slice(3)) }
+      else if (path === '/verify') { this.tab='verify' }
+      else if (path === '/ledger') { this.tab='archive'; this.loadLedger() }
+    },
+
+    go(t) { this.tab = t; if (t==='archive' && !this.ledger) this.loadLedger() },
+    scrollTop(){ window.scrollTo({top:0,behavior:'smooth'}) },
+
+    async mint() {
+      this.minting = true; this.error=''; this.result=null; this.progress=6;
+      const stages = [
+        'Expanding brief with Gemini…',
+        'Generating on NVIDIA NIM…',
+        'Hashing output and building manifest…',
+        'Embedding manifest into the file…',
+        'Writing to Backblaze B2 under Object Lock…'
+      ];
+      let i=0; this.stage=stages[0];
+      const tick = setInterval(()=>{
+        i = Math.min(i+1, stages.length-1);
+        this.stage = stages[i];
+        this.progress = Math.min(this.progress + 17, 92);
+      }, 3200);
+
+      try {
+        const res = await fetch('/api/mint', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({
+            brief:this.brief, expand:this.expand,
+            parent_run_id:this.parent, project_id:'default'
+          })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Generation failed');
+        this.progress = 100; this.result = data; this.parent = null;
+        this.ledger = null;
+      } catch(e) {
+        this.error = e.message;
+      } finally {
+        clearInterval(tick); this.minting = false;
+      }
+    },
+
+    async handleFile(file) {
+      if (!file) return;
+      this.verifying = true; this.verdict = null;
+      try {
+        const fd = new FormData(); fd.append('file', file);
+        const res = await fetch('/api/verify', {method:'POST', body:fd});
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Verification failed');
+        this.verdict = data;
+      } catch(e) {
+        this.verdict = {
+          verdict:'TAMPERED', headline:'Could not verify', detail:e.message,
+          filename:file.name, checks:[], uploaded_sha256:''
+        };
+      } finally { this.verifying = false }
+    },
+
+    badge(v) {
+      return {
+        AUTHENTIC:     {icon:'✓', bg:'bg-emerald-500/15 text-emerald-400', text:'text-emerald-400'},
+        MODIFIED:      {icon:'!', bg:'bg-amber-500/15 text-amber-400',   text:'text-amber-400'},
+        TAMPERED:      {icon:'✕', bg:'bg-rose-500/15 text-rose-400',     text:'text-rose-400'},
+        UNSIGNED:      {icon:'?', bg:'bg-slate-700/40 text-slate-400',   text:'text-slate-300'},
+        UNKNOWN_ORIGIN:{icon:'?', bg:'bg-sky-500/15 text-sky-400',       text:'text-sky-400'}
+      }[v] || {icon:'?', bg:'bg-slate-700/40 text-slate-400', text:'text-slate-300'};
+    },
+
+    async loadLedger() {
+      try {
+        const data = await (await fetch('/api/ledger')).json();
+        this.ledger = data.records || [];
+      } catch(e) { this.ledger = [] }
+    },
+
+    async openCert(sha) {
+      this.copied=false; this.lineage=null;
+      try {
+        const res = await fetch('/api/record/'+sha);
+        if (!res.ok) return;
+        this.cert = await res.json();
+        history.pushState({}, '', '/c/'+sha);
+        this.lineage = await (await fetch('/api/lineage/'+this.cert.run_id)).json();
+      } catch(e) {}
+    },
+
+    closeCert() { this.cert=null; this.lineage=null; history.pushState({}, '', '/') },
+
+    copyLink() {
+      navigator.clipboard.writeText(location.origin+'/c/'+this.cert.sha256);
+      this.copied = true; setTimeout(()=>this.copied=false, 2000);
+    }
+  }
+}
+</script>
+</body>
+</html>
