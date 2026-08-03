@@ -11,14 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from . import pipeline, seal, storage
-from .config import (
-    GEMINI_CHAT_MODEL,
-    GEMINI_FALLBACKS,
-    GEMINI_PRIMARY,
-    NVIDIA_FALLBACKS,
-    NVIDIA_PRIMARY,
-    settings,
-)
+from .config import GEMINI_CHAT_MODELS, settings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,6 +33,8 @@ class MintRequest(BaseModel):
     project_id: str = "default"
     parent_run_id: str | None = None
     expand: bool = True
+    # None = walk the failover chain; an id pins the mint to one provider.
+    provider: str | None = None
 
 
 # --- pages ----------------------------------------------------------------
@@ -74,18 +69,22 @@ def health() -> dict[str, Any]:
             "key_strategy": "CONTENT_ADDRESSABLE",
             "object_lock": storage.object_lock_status(),
         },
-        "providers": {
-            "nvidia_nim": {
-                "enabled": bool(settings.nvidia_api_key),
-                "primary": NVIDIA_PRIMARY,
-                "fallbacks": NVIDIA_FALLBACKS,
-            },
-            "google": {
-                "enabled": bool(settings.gemini_api_key),
-                "primary": GEMINI_PRIMARY,
-                "fallbacks": GEMINI_FALLBACKS,
-                "chat": GEMINI_CHAT_MODEL,
-            },
+        # Derived from the same list the pipeline walks, so the UI can never
+        # advertise a provider the pipeline would not actually use.
+        "providers": [
+            {
+                "id": leg["id"],
+                "name": leg["name"],
+                "primary": leg["model"],
+                "fallbacks": leg["fallbacks"],
+                "keyless": leg.get("keyless", False),
+            }
+            for leg in pipeline._providers()
+        ],
+        "prompt_expansion": {
+            "enabled": bool(settings.gemini_api_key),
+            "provider": "google",
+            "models": GEMINI_CHAT_MODELS,
         },
     }
 
@@ -98,6 +97,7 @@ def mint(request: MintRequest) -> dict[str, Any]:
             project_id=request.project_id,
             parent_run_id=request.parent_run_id,
             expand=request.expand,
+            provider=request.provider,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

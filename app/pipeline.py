@@ -35,6 +35,8 @@ from .config import (
     NVIDIA_FALLBACKS,
     NVIDIA_PARAMS,
     NVIDIA_PRIMARY,
+    POLLINATIONS_FALLBACKS,
+    POLLINATIONS_PRIMARY,
     settings,
 )
 
@@ -97,8 +99,14 @@ def expand_prompt(brief: str) -> tuple[str, dict[str, Any]]:
 # --- provider legs --------------------------------------------------------
 
 
-def _providers() -> list[dict[str, Any]]:
-    """Ordered generation legs, skipping any whose key is absent."""
+def _providers(only: str | None = None) -> list[dict[str, Any]]:
+    """Ordered generation legs, skipping any whose key is absent.
+
+    ``only`` pins the mint to a single provider (by ``id``) instead of walking
+    the failover chain — used by the Studio's provider selector so a user can
+    compare providers deliberately rather than only seeing whichever one
+    happened to answer first.
+    """
     legs: list[dict[str, Any]] = []
 
     if settings.nvidia_api_key:
@@ -106,6 +114,7 @@ def _providers() -> list[dict[str, Any]]:
 
         legs.append(
             {
+                "id": "nvidia",
                 "name": "NVIDIA NIM",
                 # NIM functions cold-start, and the first call after an idle
                 # period can sit well past the 120s default before returning.
@@ -121,11 +130,27 @@ def _providers() -> list[dict[str, Any]]:
             }
         )
 
+    # Keyless, so it is always available — the leg that makes failover real.
+    from .providers import PollinationsImageProvider
+
+    legs.append(
+        {
+            "id": "pollinations",
+            "name": "Pollinations",
+            "factory": lambda out: PollinationsImageProvider(output_dir=out),
+            "model": POLLINATIONS_PRIMARY,
+            "fallbacks": POLLINATIONS_FALLBACKS,
+            "params": {"width": 1024, "height": 1024},
+            "keyless": True,
+        }
+    )
+
     if settings.gemini_api_key:
         from genblaze_google import GeminiImageProvider
 
         legs.append(
             {
+                "id": "google",
                 "name": "Google Gemini",
                 "factory": lambda out: GeminiImageProvider(
                     api_key=settings.gemini_api_key, output_dir=out
@@ -135,6 +160,15 @@ def _providers() -> list[dict[str, Any]]:
                 "params": {},
             }
         )
+
+    if only:
+        picked = [leg for leg in legs if leg["id"] == only]
+        if not picked:
+            raise RuntimeError(
+                f"Unknown or unavailable provider {only!r}. "
+                f"Available: {', '.join(leg['id'] for leg in legs)}"
+            )
+        return picked
 
     return legs
 
@@ -240,12 +274,13 @@ def mint(
     project_id: str = "default",
     parent_run_id: str | None = None,
     expand: bool = True,
+    provider: str | None = None,
 ) -> dict[str, Any]:
     """Generate -> seal -> store -> record. Returns the ledger entry."""
     if not settings.b2_configured:
         raise RuntimeError("Backblaze B2 is not configured.")
 
-    legs = _providers()
+    legs = _providers(only=provider)
     if not legs:
         raise RuntimeError("No generation provider configured. Set NVIDIA_API_KEY or GEMINI_API_KEY.")
 
@@ -364,6 +399,7 @@ def mint(
         "brief": brief,
         "prompt": prompt,
         "provider": used["name"],
+        "provider_id": used["id"],
         "model": used["model"],
         "fallback_chain": used["fallbacks"],
         "params": used.get("params", {}),

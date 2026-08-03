@@ -293,10 +293,23 @@ def verify_bytes(data: bytes, filename: str) -> dict[str, Any]:
         "manifest": None,
         "ledger": None,
         "c2pa": None,
+        "forensics": None,
     }
 
     def add_check(name: str, passed: bool | None, detail: str) -> None:
         result["checks"].append({"name": name, "passed": passed, "detail": detail})
+
+    # --- Observations: whatever metadata the file carries ------------------
+    # Not evidence — EXIF is forgeable and strippable — but it is often the only
+    # thing an unsigned file has, and it answers real questions: what camera,
+    # which editor touched it last, where was it taken.
+    try:
+        from . import forensics
+
+        result["forensics"] = forensics.inspect(scratch)
+    except Exception:
+        log.warning("forensics pass failed", exc_info=True)
+        result["forensics"] = None
 
     # --- Layer 0: C2PA Content Credentials from any issuer ----------------
     # Runs first and independently of ProofPrint's own manifest, so a file that

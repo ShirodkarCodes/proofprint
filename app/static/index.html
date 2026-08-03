@@ -126,25 +126,60 @@
           </div>
         </template>
 
-        <!-- provider chain -->
-        <template x-if="health">
-          <div class="mt-6 pt-5 border-t border-slate-800/80 text-xs space-y-2.5">
-            <div class="text-slate-500 uppercase tracking-wider font-medium">Active pipeline</div>
-            <template x-if="health.providers.google.enabled">
-              <div class="flex gap-2.5"><span class="text-slate-600">1</span>
-                <div><span class="text-slate-300">Prompt expansion</span>
-                  <div class="mono text-slate-500" x-text="'google · '+health.providers.google.chat"></div></div></div>
-            </template>
-            <template x-if="health.providers.nvidia_nim.enabled">
-              <div class="flex gap-2.5"><span class="text-slate-600">2</span>
-                <div><span class="text-slate-300">Image generation</span>
-                  <div class="mono text-slate-500" x-text="'nvidia nim · '+health.providers.nvidia_nim.primary"></div>
-                  <div class="mono text-slate-600" x-text="'↳ fallback: '+health.providers.nvidia_nim.fallbacks.join(' → ')"></div></div></div>
-            </template>
-            <div class="flex gap-2.5"><span class="text-slate-600">3</span>
-              <div><span class="text-slate-300">Seal & store</span>
-                <div class="mono text-slate-500"
-                     x-text="'b2://'+(health.b2.bucket||'?')+' · '+health.b2.object_lock"></div></div></div>
+        <!-- provider selector + active chain -->
+        <template x-if="health && health.providers">
+          <div class="mt-6 pt-5 border-t border-slate-800/80">
+            <div class="text-xs uppercase tracking-wider text-slate-500 font-medium mb-2.5">
+              Image provider
+            </div>
+            <div class="grid grid-cols-2 gap-1.5">
+              <button @click="providerId=null" :disabled="minting"
+                class="text-left px-2.5 py-2 rounded-lg border text-xs transition disabled:opacity-50"
+                :class="providerId===null
+                  ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-300'
+                  : 'border-slate-800 text-slate-400 hover:border-slate-600'">
+                <div class="font-medium">Auto</div>
+                <div class="text-[10px] text-slate-500 mt-0.5">failover chain</div>
+              </button>
+              <template x-for="p in health.providers" :key="p.id">
+                <button @click="providerId=p.id" :disabled="minting"
+                  class="text-left px-2.5 py-2 rounded-lg border text-xs transition disabled:opacity-50"
+                  :class="providerId===p.id
+                    ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-300'
+                    : 'border-slate-800 text-slate-400 hover:border-slate-600'">
+                  <div class="font-medium flex items-center gap-1">
+                    <span x-text="p.name"></span>
+                    <span x-show="p.keyless" class="text-[9px] px-1 rounded bg-sky-500/20 text-sky-300">no key</span>
+                  </div>
+                  <div class="mono text-[10px] text-slate-500 mt-0.5 truncate" x-text="p.primary"></div>
+                </button>
+              </template>
+            </div>
+
+            <div class="mt-4 space-y-2 text-xs">
+              <div class="text-slate-500 uppercase tracking-wider font-medium">Active pipeline</div>
+              <template x-if="health.prompt_expansion && health.prompt_expansion.enabled && expand">
+                <div class="flex gap-2.5"><span class="text-slate-600">1</span>
+                  <div><span class="text-slate-300">Prompt expansion</span>
+                    <div class="mono text-slate-500"
+                         x-text="health.prompt_expansion.provider + ' · ' + health.prompt_expansion.models[0]"></div>
+                  </div></div>
+              </template>
+              <template x-for="(p,i) in activeChain()" :key="p.id">
+                <div class="flex gap-2.5"><span class="text-slate-600" x-text="i+2"></span>
+                  <div class="min-w-0">
+                    <span class="text-slate-300" x-text="i===0 ? 'Image generation' : 'Failover'"></span>
+                    <div class="mono text-slate-500 truncate" x-text="p.name.toLowerCase() + ' · ' + p.primary"></div>
+                    <div x-show="p.fallbacks && p.fallbacks.length"
+                         class="mono text-slate-600 truncate"
+                         x-text="'↳ models: ' + (p.fallbacks||[]).join(' → ')"></div>
+                  </div></div>
+              </template>
+              <div class="flex gap-2.5"><span class="text-slate-600" x-text="activeChain().length+2"></span>
+                <div><span class="text-slate-300">Seal &amp; store</span>
+                  <div class="mono text-slate-500"
+                       x-text="'b2://'+(health.b2.bucket||'?')+' · '+health.b2.object_lock"></div></div></div>
+            </div>
           </div>
         </template>
       </div>
@@ -345,6 +380,72 @@
             </div>
           </template>
 
+          <!-- File observations (EXIF / XMP / generator metadata) -->
+          <template x-if="verdict.forensics">
+            <div class="mt-5 pt-4 border-t border-slate-800/80">
+              <button @click="showForensics = !showForensics"
+                      class="flex items-center gap-2 w-full text-left group">
+                <span class="text-xs font-medium uppercase tracking-wider text-slate-500
+                             group-hover:text-slate-300">File observations</span>
+                <span class="text-[10px] text-slate-600" x-text="verdict.forensics.format + ' · ' + verdict.forensics.dimensions"></span>
+                <span class="ml-auto text-slate-600 text-xs"
+                      x-text="showForensics ? '−' : '+'"></span>
+              </button>
+
+              <div x-show="showForensics" class="mt-3 space-y-3 text-xs">
+                <div class="text-[11px] text-amber-400/80 bg-amber-500/5 border border-amber-500/20 rounded p-2 leading-relaxed">
+                  Observations, not evidence. Metadata is trivially forged and routinely
+                  stripped — use it as a lead, never as proof.
+                </div>
+
+                <template x-for="grp in [['camera','Camera / device'],['capture','Capture settings'],['edits','Editing history'],['rights','Rights & authorship']]" :key="grp[0]">
+                  <template x-if="verdict.forensics[grp[0]] && Object.keys(verdict.forensics[grp[0]]).length">
+                    <div>
+                      <div class="text-slate-500 mb-1" x-text="grp[1]"></div>
+                      <template x-for="[k,v] in Object.entries(verdict.forensics[grp[0]])" :key="k">
+                        <div class="flex gap-2 py-0.5">
+                          <span class="text-slate-600 shrink-0 w-40 truncate" x-text="k"></span>
+                          <span class="mono text-slate-300 break-all" x-text="Array.isArray(v)?v.join(', '):v"></span>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                </template>
+
+                <template x-if="verdict.forensics.gps">
+                  <div>
+                    <div class="text-slate-500 mb-1">Location</div>
+                    <div class="mono text-rose-300"
+                         x-text="verdict.forensics.gps.latitude + ', ' + verdict.forensics.gps.longitude"></div>
+                    <a :href="verdict.forensics.gps.maps_url" target="_blank" rel="noopener"
+                       class="text-sky-400 hover:text-sky-300">open in map →</a>
+                  </div>
+                </template>
+
+                <template x-if="verdict.forensics.generator_params">
+                  <div>
+                    <div class="text-slate-500 mb-1">
+                      Generator parameters
+                      <span class="mono text-slate-600" x-text="'(' + verdict.forensics.generator_params.key + ')'"></span>
+                    </div>
+                    <pre class="mono text-[10px] text-slate-400 bg-black/40 rounded p-2 overflow-x-auto whitespace-pre-wrap max-h-40"
+                         x-text="verdict.forensics.generator_params.value"></pre>
+                  </div>
+                </template>
+
+                <template x-if="verdict.forensics.notes && verdict.forensics.notes.length">
+                  <div class="space-y-1 pt-1">
+                    <template x-for="n in verdict.forensics.notes" :key="n">
+                      <div class="flex gap-2 text-slate-400 leading-relaxed">
+                        <span class="text-slate-600">•</span><span x-text="n"></span>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+
           <div class="mt-4 text-xs">
             <span class="text-slate-500">uploaded sha256</span>
             <div class="mono text-slate-400 mt-0.5 hash" x-text="verdict.uploaded_sha256"></div>
@@ -495,8 +596,8 @@
 function proofprint() {
   return {
     tab:'studio', health:null, brief:'', expand:true, parent:null,
-    minting:false, stage:'', progress:0, result:null, error:'',
-    drag:false, verifying:false, verdict:null,
+    minting:false, stage:'', progress:0, result:null, error:'', providerId:null,
+    drag:false, verifying:false, verdict:null, showForensics:false,
     ledger:null, cert:null, lineage:null, copied:false,
 
     async boot() {
@@ -507,6 +608,13 @@ function proofprint() {
       else if (path === '/ledger') { this.tab='archive'; this.loadLedger() }
     },
 
+    activeChain() {
+      if (!this.health || !this.health.providers) return [];
+      return this.providerId
+        ? this.health.providers.filter(p => p.id === this.providerId)
+        : this.health.providers;
+    },
+
     go(t) { this.tab = t; if (t==='archive' && !this.ledger) this.loadLedger() },
     scrollTop(){ window.scrollTo({top:0,behavior:'smooth'}) },
 
@@ -514,7 +622,7 @@ function proofprint() {
       this.minting = true; this.error=''; this.result=null; this.progress=6;
       const stages = [
         'Expanding brief with Gemini…',
-        'Generating on NVIDIA NIM…',
+        `Generating on ${(this.activeChain()[0]||{}).name || 'the provider chain'}…`,
         'Hashing output and building manifest…',
         'Embedding manifest into the file…',
         'Writing to Backblaze B2 under Object Lock…'
@@ -530,7 +638,7 @@ function proofprint() {
         const res = await fetch('/api/mint', {
           method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({
-            brief:this.brief, expand:this.expand,
+            brief:this.brief, expand:this.expand, provider:this.providerId,
             parent_run_id:this.parent, project_id:'default'
           })
         });
@@ -547,7 +655,7 @@ function proofprint() {
 
     async handleFile(file) {
       if (!file) return;
-      this.verifying = true; this.verdict = null;
+      this.verifying = true; this.verdict = null; this.showForensics = false;
       try {
         const fd = new FormData(); fd.append('file', file);
         const res = await fetch('/api/verify', {method:'POST', body:fd});

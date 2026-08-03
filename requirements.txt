@@ -6,6 +6,8 @@ genblaze[nvidia,google,parquet]==0.4.5
 # Reads C2PA Content Credentials so the verifier can also say something useful
 # about assets minted elsewhere (DALL-E, Firefly, Photoshop, C2PA cameras).
 c2pa-python==0.37.2
+# Pillow needs defusedxml to parse XMP, which is where editors record edit history.
+defusedxml==0.7.1
 
 fastapi==0.128.4
 uvicorn[standard]==0.42.0

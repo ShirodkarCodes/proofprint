@@ -115,6 +115,11 @@ NVIDIA_PARAMS = {"steps": 25, "cfg_scale": 3.5, "width": 1024, "height": 1024}
 GEMINI_PRIMARY = "gemini-2.5-flash-image"
 GEMINI_FALLBACKS = ["gemini-3.1-flash-image"]
 
+# Pollinations needs no key at all, which is what makes it a dependable last
+# leg: a failover that requires its own paid credentials is not a failover.
+POLLINATIONS_PRIMARY = "flux"
+POLLINATIONS_FALLBACKS = ["turbo", "sana"]
+
 # Chat models used to expand a short brief into a production prompt, tried in
 # order. Google retires these on a rolling basis and closes older ones to new
 # API keys ("no longer available to new users"), so a single pinned id is a
