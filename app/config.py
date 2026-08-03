@@ -24,11 +24,28 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _region(name: str) -> str | None:
+    """Accept either a bare B2 region or a pasted S3 endpoint.
+
+    The B2 console shows buckets as ``s3.us-east-005.backblazeb2.com``, so that
+    whole string is the natural thing to copy. boto3 wants ``us-east-005``.
+    """
+    raw = _env(name)
+    if not raw:
+        return None
+    value = raw.strip().lower()
+    for scheme in ("https://", "http://"):
+        value = value.removeprefix(scheme)
+    value = value.rstrip("/")
+    value = value.removeprefix("s3.").removesuffix(".backblazeb2.com")
+    return value or None
+
+
 @dataclass(frozen=True)
 class Settings:
     # --- Backblaze B2 -----------------------------------------------------
     b2_bucket: str | None = field(default_factory=lambda: _env("B2_BUCKET"))
-    b2_region: str | None = field(default_factory=lambda: _env("B2_REGION"))
+    b2_region: str | None = field(default_factory=lambda: _region("B2_REGION"))
     b2_key_id: str | None = field(default_factory=lambda: _env("B2_KEY_ID"))
     b2_app_key: str | None = field(default_factory=lambda: _env("B2_APP_KEY"))
 
@@ -84,14 +101,28 @@ settings.work_dir.mkdir(parents=True, exist_ok=True)
 # Genblaze handles in-provider model fallback via `fallback_models`; ProofPrint
 # adds a cross-provider failover on top (see app/pipeline.py).
 
-NVIDIA_PRIMARY = "black-forest-labs/flux.1-schnell"
-NVIDIA_FALLBACKS = [
-    "stabilityai/stable-diffusion-3-5-large-turbo",
-    "stabilityai/stable-diffusion-xl",
-]
+# flux.1-dev is the image function actually provisioned for a fresh NVIDIA NIM
+# account. Verified against this account: flux.1-schnell hangs (its NVCF
+# function is not provisioned), and the Stable Diffusion endpoints return 404
+# "Function not found for account". Re-check with scripts/probe_models.py before
+# changing this list.
+NVIDIA_PRIMARY = "black-forest-labs/flux.1-dev"
+NVIDIA_FALLBACKS = ["black-forest-labs/flux.1-schnell"]
+
+# flux.1-dev rejects steps < 5 with HTTP 422.
+NVIDIA_PARAMS = {"steps": 25, "cfg_scale": 3.5, "width": 1024, "height": 1024}
 
 GEMINI_PRIMARY = "gemini-2.5-flash-image"
 GEMINI_FALLBACKS = ["gemini-3.1-flash-image"]
 
-# Chat model used to expand a short brief into a production prompt.
-GEMINI_CHAT_MODEL = "gemini-2.5-flash"
+# Chat models used to expand a short brief into a production prompt, tried in
+# order. Google retires these on a rolling basis and closes older ones to new
+# API keys ("no longer available to new users"), so a single pinned id is a
+# liability — gemini-2.5-flash already 404s for keys issued recently.
+GEMINI_CHAT_MODELS = [
+    "gemini-3.5-flash",
+    "gemini-flash-latest",
+    "gemini-3-flash-preview",
+    "gemini-2.0-flash",
+]
+GEMINI_CHAT_MODEL = GEMINI_CHAT_MODELS[0]

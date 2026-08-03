@@ -6,12 +6,11 @@ manifest that ends up embedded in the asset:
   tier 1  A Gemini chat step expands a short human brief into a production
           prompt. Recorded in run metadata, so the certificate shows both what
           the human asked for and what the image model was actually given.
-  tier 2  Genblaze-native ``fallback_models``: if FLUX.1-schnell fails, the same
-          provider retries down an open-weight chain (SD 3.5 Turbo -> SDXL)
-          without the caller knowing.
+  tier 2  Genblaze-native ``fallback_models``: if FLUX.1-dev fails, the same
+          provider retries down an open-weight chain without the caller knowing.
   tier 3  Cross-provider failover: if the whole NVIDIA NIM leg is down, the mint
-          re-runs against Google (Gemini Image / Imagen). Genblaze's uniform
-          Pipeline API is what makes this a provider swap rather than a rewrite.
+          re-runs against Google. Genblaze's uniform Pipeline API is what makes
+          this a provider swap rather than a rewrite.
 
 Every attempt — including the failures — is reported back to the UI, because
 "it fell back twice and still delivered" is the actual production story.
@@ -30,10 +29,11 @@ from genblaze_core import Modality, Pipeline
 
 from . import storage
 from .config import (
-    GEMINI_CHAT_MODEL,
+    GEMINI_CHAT_MODELS,
     GEMINI_FALLBACKS,
     GEMINI_PRIMARY,
     NVIDIA_FALLBACKS,
+    NVIDIA_PARAMS,
     NVIDIA_PRIMARY,
     settings,
 )
@@ -52,38 +52,46 @@ PROMPT_SYSTEM = (
 
 
 def expand_prompt(brief: str) -> tuple[str, dict[str, Any]]:
-    """Expand a brief via Gemini chat. Falls back to the raw brief on any error."""
-    meta: dict[str, Any] = {"prompt_expansion": "skipped"}
+    """Expand a brief via Gemini chat, walking the model list on failure.
+
+    Never fatal: prompt expansion is an enhancement, so any failure degrades to
+    generating from the raw brief rather than failing the mint.
+    """
     if not settings.gemini_api_key:
-        return brief, meta
+        return brief, {"prompt_expansion": "skipped"}
 
-    try:
-        from genblaze_google import chat
+    from genblaze_google import chat
 
+    errors: list[str] = []
+    for model in GEMINI_CHAT_MODELS:
         started = time.monotonic()
-        response = chat(
-            GEMINI_CHAT_MODEL,
-            prompt=brief,
-            system=PROMPT_SYSTEM,
-            api_key=settings.gemini_api_key,
-            temperature=0.8,
-            max_tokens=300,
-        )
-        text = (getattr(response, "text", None) or "").strip()
-        if not text:
-            return brief, {"prompt_expansion": "empty-response"}
+        try:
+            response = chat(
+                model,
+                prompt=brief,
+                system=PROMPT_SYSTEM,
+                api_key=settings.gemini_api_key,
+                temperature=0.8,
+                max_tokens=300,
+            )
+            text = (getattr(response, "text", None) or "").strip()
+            if not text:
+                errors.append(f"{model}: empty response")
+                continue
 
-        meta = {
-            "prompt_expansion": "ok",
-            "prompt_expansion_model": GEMINI_CHAT_MODEL,
-            "prompt_expansion_provider": "google",
-            "prompt_expansion_ms": round((time.monotonic() - started) * 1000),
-            "original_brief": brief,
-        }
-        return text, meta
-    except Exception as exc:
-        log.warning("prompt expansion failed: %s", exc)
-        return brief, {"prompt_expansion": f"failed: {type(exc).__name__}"}
+            return text, {
+                "prompt_expansion": "ok",
+                "prompt_expansion_model": model,
+                "prompt_expansion_provider": "google",
+                "prompt_expansion_ms": round((time.monotonic() - started) * 1000),
+                "prompt_expansion_attempts": errors or None,
+                "original_brief": brief,
+            }
+        except Exception as exc:
+            log.warning("prompt expansion via %s failed: %s", model, exc)
+            errors.append(f"{model}: {type(exc).__name__}")
+
+    return brief, {"prompt_expansion": "failed", "prompt_expansion_attempts": errors}
 
 
 # --- provider legs --------------------------------------------------------
@@ -99,11 +107,17 @@ def _providers() -> list[dict[str, Any]]:
         legs.append(
             {
                 "name": "NVIDIA NIM",
+                # NIM functions cold-start, and the first call after an idle
+                # period can sit well past the 120s default before returning.
                 "factory": lambda out: NvidiaImageProvider(
-                    api_key=settings.nvidia_api_key, output_dir=out
+                    api_key=settings.nvidia_api_key,
+                    output_dir=out,
+                    http_timeout=300.0,
+                    nvcf_timeout=300.0,
                 ),
                 "model": NVIDIA_PRIMARY,
                 "fallbacks": NVIDIA_FALLBACKS,
+                "params": NVIDIA_PARAMS,
             }
         )
 
@@ -118,6 +132,7 @@ def _providers() -> list[dict[str, Any]]:
                 ),
                 "model": GEMINI_PRIMARY,
                 "fallbacks": GEMINI_FALLBACKS,
+                "params": {},
             }
         )
 
@@ -140,6 +155,30 @@ def _first_asset(run: Any) -> Any:
         for asset in step.assets or []:
             return asset
     raise RuntimeError("Pipeline completed but produced no assets")
+
+
+def _assert_produced(result: Any, run: Any) -> None:
+    """Treat a step failure as a leg failure so cross-provider failover fires.
+
+    ``Pipeline.run()`` does not raise by default — it returns a result whose
+    steps carry ``status='failed'`` and an ``error``. Without this check a dead
+    provider looks like success right up until asset extraction, and the
+    failover leg never gets a chance to run.
+    """
+    # failed_steps is a method on PipelineResult, not a property — calling it is
+    # the difference between inspecting failures and truthily inspecting a
+    # bound method.
+    failed_steps = getattr(result, "failed_steps", None)
+    failed = list(failed_steps() or []) if callable(failed_steps) else list(failed_steps or [])
+    if failed:
+        reasons = "; ".join(
+            str(getattr(step, "error", None) or getattr(step, "error_code", "unknown"))
+            for step in failed
+        )
+        raise RuntimeError(reasons or "step failed")
+
+    if not any(step.assets for step in (run.steps or [])):
+        raise RuntimeError(f"run finished with status={run.status!s} but produced no assets")
 
 
 def _materialize(asset: Any, output_dir: Path) -> Path:
@@ -233,13 +272,12 @@ def mint(
             if parent_run_id:
                 pipe._parent_run_id = parent_run_id
 
+            # Run-scoped metadata is keyword-only and additive across calls.
             pipe.metadata(
-                {
-                    **expansion_meta,
-                    "app": "proofprint",
-                    "brief": brief,
-                    "generation_provider": leg["name"],
-                }
+                app="proofprint",
+                brief=brief,
+                generation_provider=leg["name"],
+                **{k: v for k, v in expansion_meta.items() if v is not None},
             )
 
             pipe.step(
@@ -248,10 +286,19 @@ def mint(
                 prompt=prompt,
                 modality=Modality.IMAGE,
                 fallback_models=leg["fallbacks"],
+                **leg.get("params", {}),
             )
 
-            result = pipe.run(sink=sink, timeout=settings.step_timeout)
+            # raise_on_failure=True is the genblaze-core 0.4.0 default; opting in
+            # now makes a dead provider raise here instead of returning a
+            # success-shaped result with failed steps inside it.
+            result = pipe.run(
+                sink=sink,
+                timeout=settings.step_timeout,
+                raise_on_failure=True,
+            )
             run, manifest = _unwrap(result)
+            _assert_produced(result, run)
             used = leg
             attempts.append(
                 {
@@ -319,6 +366,7 @@ def mint(
         "provider": used["name"],
         "model": used["model"],
         "fallback_chain": used["fallbacks"],
+        "params": used.get("params", {}),
         "attempts": attempts,
         "expansion": expansion_meta,
         # sha256 is the sealed digest: the identity a verifier presents.

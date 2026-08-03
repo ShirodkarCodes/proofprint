@@ -218,9 +218,9 @@ def list_ledger(limit: int = 200) -> list[dict[str, Any]]:
 
     while True:
         page = backend().list(prefix, max_keys=1000, continuation_token=token)
-        for entry in getattr(page, "objects", None) or getattr(page, "keys", []) or []:
-            keys.append(entry if isinstance(entry, str) else getattr(entry, "key", str(entry)))
-        token = getattr(page, "continuation_token", None) or getattr(page, "next_token", None)
+        for entry in page.entries or []:
+            keys.append(entry.key if hasattr(entry, "key") else str(entry))
+        token = page.next_token
         if not token:
             break
 

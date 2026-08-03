@@ -60,14 +60,63 @@ def detect_mime(path: Path) -> str:
     return sniff_mime(path) or "application/octet-stream"
 
 
+# An upload is untrusted input, and at least one Genblaze handler (JPEG/XMP) can
+# spin indefinitely on real provider output. A worker thread with a deadline
+# keeps a hostile or merely awkward file from pinning a request forever.
+EXTRACT_TIMEOUT_SEC = 20
+
+
+def _extract_bounded(handler: Any, path: Path) -> Manifest:
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FuturesTimeout
+
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(handler.extract, path)
+    try:
+        return future.result(timeout=EXTRACT_TIMEOUT_SEC)
+    except FuturesTimeout as exc:
+        raise TimeoutError(f"metadata extraction exceeded {EXTRACT_TIMEOUT_SEC}s") from exc
+    finally:
+        # The stuck worker is abandoned rather than joined; shutdown(wait=False)
+        # keeps the request path free.
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+# Sealed stills are normalised to PNG before embedding. Two reasons:
+#   1. PNG is lossless, so the sealed artefact is pixel-identical to what the
+#      model produced — re-encoding a JPEG to carry a manifest would silently
+#      degrade the very asset we are certifying.
+#   2. Genblaze's JPEG XMP path is not usable here: JpegHandler.extract() hangs
+#      on provider-sized JPEGs (reproduced against NVIDIA NIM output), whereas
+#      the PNG iTXt path round-trips in milliseconds.
+NORMALISE_TO_PNG = {"image/jpeg", "image/webp"}
+
+
+def _to_png(source: Path) -> Path:
+    from PIL import Image
+
+    target = source.with_suffix(".norm.png")
+    with Image.open(source) as image:
+        image.convert("RGBA" if "A" in image.getbands() else "RGB").save(
+            target, format="PNG", optimize=False
+        )
+    return target
+
+
 def seal_file(source: Path, manifest: Manifest) -> tuple[Path, str, str]:
     """Embed ``manifest`` into ``source``.
 
     Returns ``(sealed_path, mime, sealed_sha256)``. ``sealed_sha256`` is the
     digest of the file *after* embedding — the reference value that layer 3 of
-    verification compares against.
+    verification compares against. The raw provider output stays in B2 under its
+    own content-addressed key, so the manifest's declared asset hash remains
+    checkable against the untouched original.
     """
     mime = detect_mime(source)
+    if mime in NORMALISE_TO_PNG:
+        source = _to_png(source)
+        mime = "image/png"
+
     handler = get_handler(mime)
     if handler is None:
         raise RuntimeError(f"No Genblaze media handler can embed a manifest into {mime!r}")
@@ -164,7 +213,19 @@ def verify_bytes(data: bytes, filename: str) -> dict[str, Any]:
         return result
 
     try:
-        manifest = handler.extract(scratch)
+        manifest = _extract_bounded(handler, scratch)
+    except TimeoutError:
+        add_check(
+            "Manifest present",
+            None,
+            f"Timed out reading {result['mime']} metadata after {EXTRACT_TIMEOUT_SEC}s.",
+        )
+        result["headline"] = "Could not read this file's metadata"
+        result["detail"] = (
+            "Metadata extraction for this format exceeded the time budget, so no "
+            "verdict can be given. Sealed ProofPrint stills are PNG."
+        )
+        return result
     except Exception as exc:
         add_check("Manifest present", False, f"No embedded manifest ({type(exc).__name__}).")
         return result
