@@ -3,7 +3,10 @@
 # 0.4.5 is the latest umbrella release actually published to PyPI.
 genblaze[nvidia,google,parquet]==0.4.5
 
+# Reads C2PA Content Credentials so the verifier can also say something useful
+# about assets minted elsewhere (DALL-E, Firefly, Photoshop, C2PA cameras).
+c2pa-python==0.37.2
+
 fastapi==0.128.4
 uvicorn[standard]==0.42.0
 python-multipart==0.0.20
-jinja2==3.1.6

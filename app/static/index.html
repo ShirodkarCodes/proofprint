@@ -226,6 +226,14 @@
       hash, and re-hashes the bytes against the immutable record in Backblaze B2.
       Change a single pixel and the check fails.
     </p>
+    <p class="text-slate-500 mt-2 max-w-2xl text-sm leading-relaxed">
+      Files minted elsewhere are read too: if an image carries
+      <span class="text-violet-400">C2PA Content Credentials</span> — as output from DALL·E,
+      Adobe Firefly, Photoshop and C2PA-enabled cameras does — its issuer, signing time and
+      declared actions are surfaced, including the
+      <span class="mono text-violet-400">algorithmicMedia</span> marker that denotes
+      AI-generated content.
+    </p>
 
     <div class="mt-7 grid lg:grid-cols-2 gap-6">
       <div>
@@ -279,6 +287,43 @@
               </div>
             </template>
           </div>
+
+          <!-- C2PA Content Credentials from any issuer -->
+          <template x-if="verdict.c2pa">
+            <div class="mt-5 pt-4 border-t border-slate-800/80">
+              <div class="flex items-center gap-2 mb-2.5">
+                <span class="text-violet-400 text-xs font-medium uppercase tracking-wider">
+                  C2PA Content Credentials</span>
+                <span class="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300"
+                      x-text="verdict.c2pa.validation_state"></span>
+              </div>
+              <div class="text-xs space-y-2">
+                <template x-if="verdict.c2pa.claim_generator">
+                  <div><span class="text-slate-500">produced by</span>
+                    <span class="mono text-slate-300 ml-1" x-text="verdict.c2pa.claim_generator"></span></div>
+                </template>
+                <template x-if="verdict.c2pa.issuer">
+                  <div><span class="text-slate-500">signed by</span>
+                    <span class="mono text-slate-300 ml-1" x-text="verdict.c2pa.issuer"></span></div>
+                </template>
+                <template x-if="verdict.c2pa.signed_at">
+                  <div><span class="text-slate-500">signed at</span>
+                    <span class="mono text-slate-400 ml-1" x-text="verdict.c2pa.signed_at"></span></div>
+                </template>
+                <template x-if="verdict.c2pa.actions && verdict.c2pa.actions.length">
+                  <div class="flex flex-wrap gap-1.5 pt-0.5">
+                    <template x-for="a in verdict.c2pa.actions" :key="a">
+                      <span class="mono text-[10px] px-1.5 py-0.5 rounded border"
+                            :class="a==='algorithmicMedia'
+                              ? 'border-violet-500/40 text-violet-300 bg-violet-500/10'
+                              : 'border-slate-700 text-slate-400'"
+                            x-text="a==='algorithmicMedia' ? 'algorithmicMedia · AI-generated' : a"></span>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
 
           <template x-if="verdict.manifest">
             <div class="mt-5 pt-4 border-t border-slate-800/80 text-xs space-y-2.5">
@@ -519,11 +564,12 @@ function proofprint() {
 
     badge(v) {
       return {
-        AUTHENTIC:     {icon:'✓', bg:'bg-emerald-500/15 text-emerald-400', text:'text-emerald-400'},
-        MODIFIED:      {icon:'!', bg:'bg-amber-500/15 text-amber-400',   text:'text-amber-400'},
-        TAMPERED:      {icon:'✕', bg:'bg-rose-500/15 text-rose-400',     text:'text-rose-400'},
-        UNSIGNED:      {icon:'?', bg:'bg-slate-700/40 text-slate-400',   text:'text-slate-300'},
-        UNKNOWN_ORIGIN:{icon:'?', bg:'bg-sky-500/15 text-sky-400',       text:'text-sky-400'}
+        AUTHENTIC:          {icon:'✓', bg:'bg-emerald-500/15 text-emerald-400', text:'text-emerald-400'},
+        MODIFIED:           {icon:'!', bg:'bg-amber-500/15 text-amber-400',   text:'text-amber-400'},
+        TAMPERED:           {icon:'✕', bg:'bg-rose-500/15 text-rose-400',     text:'text-rose-400'},
+        UNSIGNED:           {icon:'?', bg:'bg-slate-700/40 text-slate-400',   text:'text-slate-300'},
+        UNKNOWN_ORIGIN:     {icon:'?', bg:'bg-sky-500/15 text-sky-400',       text:'text-sky-400'},
+        EXTERNAL_PROVENANCE:{icon:'⌘', bg:'bg-violet-500/15 text-violet-400', text:'text-violet-400'}
       }[v] || {icon:'?', bg:'bg-slate-700/40 text-slate-400', text:'text-slate-300'};
     },
 

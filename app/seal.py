@@ -24,6 +24,7 @@ forger would have to alter an immutable record to make a fake pass.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -63,7 +64,9 @@ def detect_mime(path: Path) -> str:
 # An upload is untrusted input, and at least one Genblaze handler (JPEG/XMP) can
 # spin indefinitely on real provider output. A worker thread with a deadline
 # keeps a hostile or merely awkward file from pinning a request forever.
-EXTRACT_TIMEOUT_SEC = 20
+# 8s is comfortably above the PNG path (~1s on a 3MP still) while keeping the
+# JPEG path — whose Genblaze handler can wedge — from stalling a drag-and-drop.
+EXTRACT_TIMEOUT_SEC = 8
 
 
 def _extract_bounded(handler: Any, path: Path) -> Manifest:
@@ -140,6 +143,85 @@ def seal_file(source: Path, manifest: Manifest) -> tuple[Path, str, str]:
     return sealed_path, mime, sha256_file(sealed_path)
 
 
+def read_c2pa(path: Path) -> dict[str, Any] | None:
+    """Read C2PA Content Credentials, if this file carries any.
+
+    ProofPrint's own manifests only cover assets it minted. C2PA is the industry
+    provenance standard (Adobe, Microsoft, OpenAI, Google; Leica and Sony ship it
+    in-camera), so reading it lets the verifier say something useful about an
+    image that came from DALL-E or Photoshop rather than shrugging "unsigned".
+
+    Returns None when the file has no Content Credentials, or when the c2pa
+    runtime is unavailable — this is strictly an enrichment path and must never
+    be able to fail a verification.
+    """
+    try:
+        from c2pa import Reader
+    except Exception:
+        log.debug("c2pa runtime unavailable")
+        return None
+
+    try:
+        with Reader(str(path)) as reader:
+            payload = json.loads(reader.json())
+            try:
+                state = str(reader.get_validation_state())
+            except Exception:
+                state = "unknown"
+            try:
+                embedded = bool(reader.is_embedded())
+            except Exception:
+                embedded = True
+    except Exception:
+        # The overwhelmingly common case: no C2PA data in the file at all.
+        return None
+
+    manifests = payload.get("manifests") or {}
+    active_id = payload.get("active_manifest")
+    active = manifests.get(active_id) if active_id else None
+    if active is None and manifests:
+        active = next(iter(manifests.values()))
+    if active is None:
+        return None
+
+    signature = active.get("signature_info") or {}
+    actions: list[str] = []
+    generators: list[str] = []
+    for assertion in active.get("assertions") or []:
+        label = assertion.get("label", "")
+        data = assertion.get("data") or {}
+        if label.startswith("c2pa.actions"):
+            for action in data.get("actions") or []:
+                name = action.get("action")
+                if name:
+                    actions.append(name)
+                source = action.get("digitalSourceType")
+                if source:
+                    actions.append(source.rsplit("/", 1)[-1])
+        if label.startswith("c2pa.training-mining"):
+            actions.append("training-mining-declared")
+        soft = data.get("softwareAgent")
+        if isinstance(soft, dict) and soft.get("name"):
+            generators.append(str(soft["name"]))
+        elif isinstance(soft, str):
+            generators.append(soft)
+
+    return {
+        "claim_generator": active.get("claim_generator_info")
+        or active.get("claim_generator")
+        or (generators[0] if generators else None),
+        "title": active.get("title"),
+        "format": active.get("format"),
+        "issuer": signature.get("issuer"),
+        "signed_at": signature.get("time"),
+        "cert_alg": signature.get("alg"),
+        "validation_state": state,
+        "embedded": embedded,
+        "actions": sorted(set(actions))[:8],
+        "manifest_count": len(manifests),
+    }
+
+
 def _manifest_summary(manifest: Manifest) -> dict[str, Any]:
     """Flatten a manifest into what the certificate page renders."""
     run = manifest.run
@@ -210,20 +292,51 @@ def verify_bytes(data: bytes, filename: str) -> dict[str, Any]:
         "checks": [],
         "manifest": None,
         "ledger": None,
+        "c2pa": None,
     }
 
     def add_check(name: str, passed: bool | None, detail: str) -> None:
         result["checks"].append({"name": name, "passed": passed, "detail": detail})
 
-    # --- Layer 1: is a manifest embedded? ---------------------------------
+    # --- Layer 0: C2PA Content Credentials from any issuer ----------------
+    # Runs first and independently of ProofPrint's own manifest, so a file that
+    # came from DALL-E, Firefly or a Leica body still gets a useful answer.
+    c2pa = read_c2pa(scratch)
+    if c2pa:
+        result["c2pa"] = c2pa
+        valid = "valid" in str(c2pa.get("validation_state", "")).lower()
+        issuer = c2pa.get("issuer") or "an undisclosed issuer"
+        add_check(
+            "C2PA Content Credentials",
+            valid or None,
+            f"Signed by {issuer}"
+            + (f" · {c2pa['claim_generator']}" if c2pa.get("claim_generator") else "")
+            + f" · validation: {c2pa.get('validation_state')}",
+        )
+    else:
+        add_check("C2PA Content Credentials", None, "No Content Credentials in this file.")
+
+    def unsigned_outcome() -> dict[str, Any]:
+        """No ProofPrint manifest — but C2PA may still establish provenance."""
+        if result["c2pa"]:
+            result["verdict"] = "EXTERNAL_PROVENANCE"
+            result["headline"] = "Provenance from another issuer"
+            result["detail"] = (
+                "This file was not sealed by ProofPrint, but it carries C2PA Content "
+                "Credentials describing how it was made. Those credentials are shown "
+                "below; ProofPrint cannot check them against its own immutable ledger."
+            )
+        return result
+
+    # --- Layer 1: is a ProofPrint manifest embedded? ----------------------
     handler = get_handler(result["mime"])
     if handler is None:
         add_check(
             "Manifest present",
             False,
-            f"{result['mime']} cannot carry an embedded manifest.",
+            f"{result['mime']} cannot carry an embedded Genblaze manifest.",
         )
-        return result
+        return unsigned_outcome()
 
     try:
         manifest = _extract_bounded(handler, scratch)
@@ -241,7 +354,7 @@ def verify_bytes(data: bytes, filename: str) -> dict[str, Any]:
         return result
     except Exception as exc:
         add_check("Manifest present", False, f"No embedded manifest ({type(exc).__name__}).")
-        return result
+        return unsigned_outcome()
 
     add_check("Manifest present", True, "Genblaze manifest extracted from the file itself.")
     summary = _manifest_summary(manifest)

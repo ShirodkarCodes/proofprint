@@ -49,7 +49,29 @@ immutable B2 object *before the file ever leaves the pipeline*, so forging a pas
 altering a record that cannot be altered.
 
 Verdicts: `AUTHENTIC` · `MODIFIED` (genuine record, edited bytes) · `TAMPERED` (record itself
-was altered) · `UNSIGNED` · `UNKNOWN_ORIGIN`.
+was altered) · `UNSIGNED` · `UNKNOWN_ORIGIN` · `EXTERNAL_PROVENANCE`.
+
+### Reading provenance from other issuers
+
+A verifier that only understands its own files is not much of a verifier. Before any of the
+three layers run, ProofPrint reads **C2PA Content Credentials** — the industry provenance
+standard behind Adobe, Microsoft, OpenAI, Google and C2PA-enabled Leica/Sony bodies. An image
+from DALL·E, Firefly or Photoshop therefore returns `EXTERNAL_PROVENANCE` with its claim
+generator, signing certificate, signing time and declared actions, including the
+`algorithmicMedia` digital-source marker that denotes AI-generated content.
+
+### What this cannot do
+
+**ProofPrint is a provenance system, not an AI detector.** `UNSIGNED` means *"no provenance
+found"* — never *"this is not AI"*. An image with no Content Credentials and no Genblaze
+manifest is simply unknowable; detecting synthetic media from pixels alone is an open research
+problem, and C2PA has exactly the same boundary.
+
+ProofPrint's own manifests are **hash-protected, not PKI-signed**. Layer 2 detects edits to the
+record, and layer 3 anchors the bytes to immutable storage, but unlike C2PA there is no
+certificate chain a third party can validate without trusting this deployment's B2 ledger. That
+is a deliberate scope choice for an internal chain-of-custody tool, not a claim of equivalence
+to C2PA signing.
 
 ---
 
